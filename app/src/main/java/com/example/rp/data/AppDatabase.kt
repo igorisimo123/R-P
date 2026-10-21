@@ -8,9 +8,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * Base de datos SQLite local guardada en el almacenamiento interno permanente de la app.
- * En Python esto equivale a usar `import sqlite3` y `conn = sqlite3.connect("recetas.db")`.
- * Los datos persisten aunque apagues el teléfono o cierres la app.
+ * ============================================================================
+ * ARCHIVO: AppDatabase.kt
+ * ============================================================================
+ * ¿QUÉ HACE ESTA CLASE?
+ * Es el manejador de la base de datos local SQLite y de las configuraciones persistentes (`SharedPreferences`).
  */
 class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
@@ -22,7 +24,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
     }
 
     override fun onCreate(db: SQLiteDatabase) {
-        // Tabla de Despensa (Ingredientes)
         db.execSQL(
             """
             CREATE TABLE pantry_items (
@@ -50,7 +51,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
             """.trimIndent()
         )
 
-        // Tabla de Recetas y Platillos
         db.execSQL(
             """
             CREATE TABLE recipes (
@@ -67,7 +67,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        if (oldVersion < 3) {
+        if (oldVersion < DATABASE_VERSION) {
             runCatching {
                 db.execSQL("ALTER TABLE pantry_items ADD COLUMN store_name TEXT NOT NULL DEFAULT ''")
             }
@@ -77,10 +77,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
         }
     }
 
-    /**
-     * Si la base de datos está vacía la primera vez que se instala la app,
-     * carga ingredientes básicos y 2 recetas de ejemplo (1 de Panadería con % y piezas, y 1 Platillo compuesto).
-     */
     fun seedInitialDataIfEmpty() {
         if (prefs.getBoolean("initial_seed_done", false)) return
         if (getAllPantryItems().isNotEmpty()) {
@@ -88,7 +84,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
             return
         }
 
-        // Insertamos los primeros 8 ingredientes del catálogo integrado
         val insertedIdsByName = mutableMapOf<String, Long>()
         for (item in BuiltInCatalog.items.take(8)) {
             val id = savePantryItem(item)
@@ -102,7 +97,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
         val cheeseId = insertedIdsByName["Queso Manchego / Gouda (Rebanada)"] ?: 6L
         val beefId = insertedIdsByName["Carne de Res (Molida / Bistec)"] ?: 7L
 
-        // Ejemplo 1: Receta en Modo Panadería (Porcentaje Panadero donde Harina = 100% y cada pieza pesa 100g)
         val breadRecipeId = saveRecipe(
             Recipe(
                 name = "Pan Artesanal (Base 100% Harina)",
@@ -140,7 +134,6 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
             )
         )
 
-        // Ejemplo 2: Platillo que combina ingredientes normales (en g y en piezas) + la Receta de Pan ya guardada
         saveRecipe(
             Recipe(
                 name = "Platillo con Carne, Queso y Pan",
@@ -174,7 +167,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
         prefs.edit().putBoolean("initial_seed_done", true).apply()
     }
 
-    // ==================== CRUD DE DESPENSA ====================
+    // ========================================================================
+    // CRUD DE DESPENSA
+    // ========================================================================
 
     fun getAllPantryItems(): List<PantryItem> {
         val list = mutableListOf<PantryItem>()
@@ -255,7 +250,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
         writableDatabase.delete("pantry_items", "id = ?", arrayOf(id.toString()))
     }
 
-    // ==================== CRUD DE RECETAS ====================
+    // ========================================================================
+    // CRUD DE RECETAS Y PLATILLOS
+    // ========================================================================
 
     fun getAllRecipes(): List<Recipe> {
         val list = mutableListOf<Recipe>()
@@ -312,6 +309,7 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
                 put("amountOrPercentage", comp.amountOrPercentage)
                 put("unit", comp.unit.name)
                 put("isBaseFlourInBakersMode", comp.isBaseFlourInBakersMode)
+                put("weightRetentionPercent", comp.weightRetentionPercent)
             }
             arr.put(obj)
         }
@@ -334,7 +332,8 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
                         unit = runCatching {
                             MeasureUnit.valueOf(obj.optString("unit", MeasureUnit.GRAMS.name))
                         }.getOrDefault(MeasureUnit.GRAMS),
-                        isBaseFlourInBakersMode = obj.optBoolean("isBaseFlourInBakersMode", false)
+                        isBaseFlourInBakersMode = obj.optBoolean("isBaseFlourInBakersMode", false),
+                        weightRetentionPercent = obj.optDouble("weightRetentionPercent", 100.0)
                     )
                 )
             }
@@ -342,7 +341,9 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
         return result
     }
 
-    // ==================== CONFIGURACIÓN GEMINI API KEY ====================
+    // ========================================================================
+    // CONFIGURACIÓN: GEMINI API KEY Y PERSONALIZACIÓN AVANZADA DE LA APP
+    // ========================================================================
 
     fun getGeminiApiKey(): String {
         return prefs.getString("gemini_api_key", "") ?: ""
@@ -350,5 +351,81 @@ class AppDatabase(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, n
 
     fun setGeminiApiKey(apiKey: String) {
         prefs.edit().putString("gemini_api_key", apiKey.trim()).apply()
+    }
+
+    /**
+     * Lee la configuración visual personalizada (`AppUiConfig`) desde `SharedPreferences`.
+     */
+    fun getUiConfig(): AppUiConfig {
+        val raw = prefs.getString("ui_config_json", null) ?: return AppUiConfig()
+        return runCatching {
+            val obj = JSONObject(raw)
+            val defaultCfg = AppUiConfig()
+
+            val enabledSet = mutableSetOf<String>()
+            val secArr = obj.optJSONArray("enabledSectionIds")
+            if (secArr != null) {
+                for (i in 0 until secArr.length()) {
+                    enabledSet.add(secArr.getString(i))
+                }
+            } else {
+                enabledSet.addAll(defaultCfg.enabledSectionIds)
+            }
+            // La pestaña de Configuración NUNCA puede desactivarse
+            enabledSet.add(AppSection.SETTINGS.id)
+
+            // Leemos el diccionario de textos personalizados (`customTexts`)
+            val customMap = mutableMapOf<String, String>()
+            val textsObj = obj.optJSONObject("customTexts")
+            if (textsObj != null) {
+                val keys = textsObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    customMap[k] = textsObj.getString(k)
+                }
+            }
+
+            AppUiConfig(
+                enabledSectionIds = enabledSet,
+                maxItemsPerBottomRow = obj.optInt("maxItemsPerBottomRow", defaultCfg.maxItemsPerBottomRow).coerceIn(2, 6),
+                customTexts = customMap,
+                showCalories = obj.optBoolean("showCalories", true),
+                showProtein = obj.optBoolean("showProtein", true),
+                showTotalFat = obj.optBoolean("showTotalFat", true),
+                showSaturatedFat = obj.optBoolean("showSaturatedFat", true),
+                showCarbs = obj.optBoolean("showCarbs", true),
+                showSugars = obj.optBoolean("showSugars", true),
+                showFiber = obj.optBoolean("showFiber", true),
+                showSodium = obj.optBoolean("showSodium", true)
+            )
+        }.getOrDefault(AppUiConfig())
+    }
+
+    /**
+     * Guarda la configuración visual personalizada (`AppUiConfig`) en `SharedPreferences`.
+     */
+    fun saveUiConfig(config: AppUiConfig) {
+        val safeEnabled = config.enabledSectionIds.toMutableSet().apply {
+            add(AppSection.SETTINGS.id)
+        }
+        val textsObj = JSONObject()
+        for ((k, v) in config.customTexts) {
+            textsObj.put(k, v)
+        }
+
+        val obj = JSONObject().apply {
+            put("enabledSectionIds", JSONArray(safeEnabled.toList()))
+            put("maxItemsPerBottomRow", config.maxItemsPerBottomRow.coerceIn(2, 6))
+            put("customTexts", textsObj)
+            put("showCalories", config.showCalories)
+            put("showProtein", config.showProtein)
+            put("showTotalFat", config.showTotalFat)
+            put("showSaturatedFat", config.showSaturatedFat)
+            put("showCarbs", config.showCarbs)
+            put("showSugars", config.showSugars)
+            put("showFiber", config.showFiber)
+            put("showSodium", config.showSodium)
+        }
+        prefs.edit().putString("ui_config_json", obj.toString()).apply()
     }
 }

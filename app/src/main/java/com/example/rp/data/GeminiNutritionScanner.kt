@@ -18,24 +18,36 @@ import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
- * Escáner de etiquetas nutricionales con Gemini API + compresión de imágenes.
+ * ============================================================================
+ * ARCHIVO: GeminiNutritionScanner.kt
+ * ============================================================================
+ * ¿QUÉ HACE ESTE ARCHIVO?
+ * 1. Toma una foto de la cámara o galería.
+ * 2. Le baja la resolución (`downscaleBitmap`) y la comprime en JPEG para que pese poquísimos KB
+ *    y consuma el mínimo posible de tokens/créditos de la API de Gemini.
+ * 3. Hace una petición HTTP POST asíncrona (`suspend fun`) a Google Gemini y convierte la
+ *    respuesta JSON en un objeto `NutritionInfo`.
  *
- * En Python esto equivaldría a usar `PIL.Image.thumbnail((768, 768))` + `requests.post(...)`
- * dentro de una función `async def`. En Kotlin usamos `suspend fun` con `withContext(Dispatchers.IO)`.
+ * EQUIVALENCIAS:
+ * - En Python: equivale a usar `PIL.Image.thumbnail((768, 768))` + `requests.post(...)` dentro de un `async def`.
+ * - En Kotlin: `suspend fun` con `withContext(Dispatchers.IO)` ejecuta el trabajo pesado de red/imagen
+ *   en un hilo secundario para que la pantalla del celular nunca se congele.
  */
 object GeminiNutritionScanner {
 
     /**
-     * Reduce la resolución de un Bitmap para que su lado más largo mida como máximo `maxDimensionPx`
-     * (por defecto 768px). Esto reduce drásticamente el consumo de tokens/créditos en Gemini
-     * manteniendo perfectamente legibles los números de la tabla nutricional.
+     * Reduce proporcionalmente la resolución de un `Bitmap` (imagen en memoria) para que
+     * su lado más largo mida como máximo `maxDimensionPx` (768 píxeles por defecto).
      */
     fun downscaleBitmap(original: Bitmap, maxDimensionPx: Int = 768): Bitmap {
         val width = original.width
         val height = original.height
         val longestSide = max(width, height)
+
+        // Si la imagen ya es más pequeña que 768px, la devolvemos tal cual sin gastar CPU
         if (longestSide <= maxDimensionPx) return original
 
+        // Calculamos la escala manteniendo la proporción (aspect ratio)
         val scale = maxDimensionPx.toFloat() / longestSide.toFloat()
         val newWidth = (width * scale).roundToInt().coerceAtLeast(1)
         val newHeight = (height * scale).roundToInt().coerceAtLeast(1)
@@ -43,7 +55,8 @@ object GeminiNutritionScanner {
     }
 
     /**
-     * Carga un Bitmap desde una URI de la galería del teléfono y le baja la resolución.
+     * Abre una foto elegida desde el selector de Galería (`uri`), la decodifica en memoria
+     * y le reduce la resolución inmediatamente.
      */
     fun loadAndDownscaleFromUri(context: Context, uri: Uri, maxDimensionPx: Int = 768): Bitmap? {
         return runCatching {
@@ -55,8 +68,8 @@ object GeminiNutritionScanner {
     }
 
     /**
-     * Guarda una copia comprimida de la foto en el almacenamiento interno permanente de la app
-     * (`context.filesDir`). No requiere permisos de almacenamiento externo y persiste al apagar el teléfono.
+     * Guarda una copia comprimida de la foto dentro de la carpeta privada de la app (`context.filesDir`).
+     * No necesita pedir permisos de almacenamiento externo y la foto se conserva aunque apagues el teléfono.
      */
     fun saveBitmapToInternalStorage(context: Context, bitmap: Bitmap): String? {
         return runCatching {
@@ -72,7 +85,8 @@ object GeminiNutritionScanner {
     }
 
     /**
-     * Envía la imagen ya reducida de resolución a Gemini API y devuelve `NutritionInfo` por cada 100g/100ml.
+     * Función asíncrona (`suspend fun`) que envía la imagen en baja resolución a Gemini
+     * y devuelve `Result<NutritionInfo>` (éxito con la tabla nutrimental o error si falló la red/API key).
      */
     suspend fun scanNutritionLabel(
         bitmap: Bitmap,
@@ -85,14 +99,15 @@ object GeminiNutritionScanner {
         }
 
         try {
-            // 1. Bajar resolución a máx 768px y comprimir en JPEG al 72% para gastar el mínimo de tokens
+            // PASO 1: Reducir resolución a máx 768px y comprimir en JPEG al 72% de calidad.
+            // Luego lo codificamos en texto Base64 para enviarlo dentro del JSON.
             val lowResBitmap = downscaleBitmap(bitmap, 768)
             val outputStream = ByteArrayOutputStream()
             lowResBitmap.compress(Bitmap.CompressFormat.JPEG, 72, outputStream)
             val jpegBytes = outputStream.toByteArray()
             val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
 
-            // 2. Preparar el prompt pidiendo JSON puro con valores estandarizados a 100g / 100ml
+            // PASO 2: Prompt indicando a Gemini que extraiga y normalice los valores a 100g/100ml en JSON puro.
             val prompt = """
                 Analiza esta etiqueta nutricional. Extrae los valores nutricionales por cada 100g o 100ml
                 (si la etiqueta solo muestra por porción, conviértelos proporcionalmente a 100g/100ml).
@@ -109,6 +124,7 @@ object GeminiNutritionScanner {
                 }
             """.trimIndent()
 
+            // Armamos el JSON que espera la API REST de Gemini
             val requestBody = JSONObject().apply {
                 put(
                     "contents",
@@ -136,6 +152,7 @@ object GeminiNutritionScanner {
                 )
             }
 
+            // PASO 3: Petición HTTP POST a la API de Google Gemini
             val endpoint =
                 "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey.trim()}"
             val connection = (URL(endpoint).openConnection() as HttpURLConnection).apply {
@@ -155,9 +172,10 @@ object GeminiNutritionScanner {
                 connection.inputStream.bufferedReader().use { it.readText() }
             } else {
                 val err = connection.errorStream?.bufferedReader()?.use { it.readText() } ?: "Error HTTP $responseCode"
-                return@withContext Result.failure( IllegalStateException("Error de Gemini ($responseCode): $err"))
+                return@withContext Result.failure(IllegalStateException("Error de Gemini ($responseCode): $err"))
             }
 
+            // PASO 4: Extraemos el JSON devuelto por Gemini y rellenamos nuestro struct `NutritionInfo`
             val rootJson = JSONObject(responseText)
             val textContent = rootJson
                 .getJSONArray("candidates")

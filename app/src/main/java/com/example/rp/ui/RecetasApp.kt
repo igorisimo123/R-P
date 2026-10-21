@@ -8,6 +8,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,6 +28,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -33,10 +37,20 @@ import com.example.rp.data.*
 import kotlinx.coroutines.launch
 import java.io.File
 
+/**
+ * ============================================================================
+ * ARCHIVO: RecetasApp.kt
+ * ============================================================================
+ * Contiene toda la interfaz gráfica (UI) construida con Jetpack Compose:
+ * - Todos los textos y símbolos fuera de la pestaña de Configuración se leen dinámicamente
+ *   desde `uiConfig.text(UiTextKey.XXX)` para que el cliente pueda modificarlos en Opciones Avanzadas.
+ * - Los textos e íconos de la pestaña de Configuración (`⚙️ Configuración`) son fijos y no modificables.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RecetasApp() {
     val context = LocalContext.current
+
     val db = remember {
         AppDatabase(context).also { it.seedInitialDataIfEmpty() }
     }
@@ -44,23 +58,39 @@ fun RecetasApp() {
     var pantryItems by remember { mutableStateOf(db.getAllPantryItems()) }
     var recipes by remember { mutableStateOf(db.getAllRecipes()) }
     var geminiApiKey by remember { mutableStateOf(db.getGeminiApiKey()) }
+    var uiConfig by remember { mutableStateOf(db.getUiConfig()) }
 
     fun refreshData() {
         pantryItems = db.getAllPantryItems()
         recipes = db.getAllRecipes()
     }
 
-    var selectedTab by remember { mutableIntStateOf(0) }
+    // `SETTINGS` (Configuración) siempre va al final de la lista para quedar fija en la esquina inferior derecha
+    val activeSections = remember(uiConfig.enabledSectionIds) {
+        val nonSettings = AppSection.entries.filter {
+            it != AppSection.SETTINGS && uiConfig.enabledSectionIds.contains(it.id)
+        }
+        nonSettings + AppSection.SETTINGS
+    }
+
+    var selectedSection by remember { mutableStateOf(activeSections.first()) }
+
+    LaunchedEffect(activeSections) {
+        if (!activeSections.contains(selectedSection)) {
+            selectedSection = AppSection.SETTINGS
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        text = when (selectedTab) {
-                            0 -> "🍲 Mis Recetas y Platillos"
-                            1 -> "🧺 Mi Despensa"
-                            else -> "🤖 Gemini IA y Ajustes"
+                        text = when (selectedSection) {
+                            AppSection.RECIPES -> uiConfig.text(UiTextKey.RECIPES_TOP_TITLE)
+                            AppSection.PANTRY -> uiConfig.text(UiTextKey.PANTRY_TOP_TITLE)
+                            // El título de Configuración es fijo y no se puede modificar
+                            AppSection.SETTINGS -> AppSection.SETTINGS.defaultTopTitle
                         },
                         fontWeight = FontWeight.Bold
                     )
@@ -72,26 +102,12 @@ fun RecetasApp() {
             )
         },
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    icon = { Text("🍲", fontSize = 20.sp) },
-                    label = { Text("Recetas") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    icon = { Text("🧺", fontSize = 20.sp) },
-                    label = { Text("Despensa") }
-                )
-                NavigationBarItem(
-                    selected = selectedTab == 2,
-                    onClick = { selectedTab = 2 },
-                    icon = { Text("🤖", fontSize = 20.sp) },
-                    label = { Text("IA / Ajustes") }
-                )
-            }
+            MultiRowBottomBar(
+                activeSections = activeSections,
+                selectedSection = selectedSection,
+                uiConfig = uiConfig,
+                onSelectSection = { selectedSection = it }
+            )
         }
     ) { innerPadding ->
         Box(
@@ -99,10 +115,11 @@ fun RecetasApp() {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            when (selectedTab) {
-                0 -> RecipesScreen(
+            when (selectedSection) {
+                AppSection.RECIPES -> RecipesScreen(
                     recipes = recipes,
                     pantryItems = pantryItems,
+                    uiConfig = uiConfig,
                     onSaveRecipe = { recipe ->
                         db.saveRecipe(recipe)
                         refreshData()
@@ -112,9 +129,10 @@ fun RecetasApp() {
                         refreshData()
                     }
                 )
-                1 -> PantryScreen(
+                AppSection.PANTRY -> PantryScreen(
                     pantryItems = pantryItems,
                     geminiApiKey = geminiApiKey,
+                    uiConfig = uiConfig,
                     onSaveItem = { item ->
                         db.savePantryItem(item)
                         refreshData()
@@ -124,11 +142,16 @@ fun RecetasApp() {
                         refreshData()
                     }
                 )
-                2 -> SettingsScreen(
+                AppSection.SETTINGS -> SettingsScreen(
                     currentApiKey = geminiApiKey,
+                    uiConfig = uiConfig,
                     onSaveApiKey = { newKey ->
                         db.setGeminiApiKey(newKey)
                         geminiApiKey = newKey.trim()
+                    },
+                    onUpdateUiConfig = { newConfig ->
+                        db.saveUiConfig(newConfig)
+                        uiConfig = db.getUiConfig()
                     }
                 )
             }
@@ -136,14 +159,111 @@ fun RecetasApp() {
     }
 }
 
+/**
+ * Barra de navegación inferior multi-fila donde Configuración (`⚙️ Configuración`)
+ * tiene ícono y texto fijos y siempre queda en la esquina inferior derecha.
+ */
+@Composable
+fun MultiRowBottomBar(
+    activeSections: List<AppSection>,
+    selectedSection: AppSection,
+    uiConfig: AppUiConfig,
+    onSelectSection: (AppSection) -> Unit
+) {
+    val maxPerRow = uiConfig.maxItemsPerBottomRow.coerceIn(2, 6)
+    val rows = remember(activeSections, maxPerRow) {
+        activeSections.chunked(maxPerRow)
+    }
+
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 4.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(vertical = 4.dp)
+        ) {
+            rows.forEachIndexed { rowIndex, rowSections ->
+                val isLastRow = rowIndex == rows.lastIndex
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (rows.size > 1 && isLastRow && rowSections.size < maxPerRow) {
+                        val emptySlots = maxPerRow - rowSections.size
+                        repeat(emptySlots) {
+                            Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+
+                    rowSections.forEach { section ->
+                        val isSelected = section == selectedSection
+                        val iconText = when (section) {
+                            AppSection.RECIPES -> uiConfig.text(UiTextKey.RECIPES_TAB_ICON)
+                            AppSection.PANTRY -> uiConfig.text(UiTextKey.PANTRY_TAB_ICON)
+                            // Configuración siempre mantiene su ícono fijo
+                            AppSection.SETTINGS -> AppSection.SETTINGS.defaultTabIcon
+                        }
+                        val labelText = when (section) {
+                            AppSection.RECIPES -> uiConfig.text(UiTextKey.RECIPES_TAB_LABEL)
+                            AppSection.PANTRY -> uiConfig.text(UiTextKey.PANTRY_TAB_LABEL)
+                            // Configuración siempre mantiene su texto fijo
+                            AppSection.SETTINGS -> AppSection.SETTINGS.defaultTabLabel
+                        }
+
+                        val bgColor = if (isSelected) {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.surfaceContainer
+                        }
+                        val contentColor = if (isSelected) {
+                            MaterialTheme.colorScheme.onSecondaryContainer
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(bgColor)
+                                .clickable { onSelectSection(section) }
+                                .padding(vertical = 6.dp, horizontal = 4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(text = iconText, fontSize = 18.sp)
+                            Text(
+                                text = labelText,
+                                fontSize = 11.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = contentColor,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // =========================================================================
-// PESTAÑA 1: RECETAS, PORCENTAJE PANADERO (GRAMOS O PIEZAS) Y PLATILLOS
+// APARTADO 1: RECETAS, PORCENTAJE PANADERO, PIEZAS Y ABSORCIÓN DE PESO
 // =========================================================================
 
 @Composable
 fun RecipesScreen(
     recipes: List<Recipe>,
     pantryItems: List<PantryItem>,
+    uiConfig: AppUiConfig,
     onSaveRecipe: (Recipe) -> Unit,
     onDeleteRecipe: (Long) -> Unit
 ) {
@@ -158,6 +278,7 @@ fun RecipesScreen(
             initialRecipe = editingRecipe,
             allRecipes = recipes,
             pantryItems = pantryItems,
+            uiConfig = uiConfig,
             onDismiss = { showEditor = false },
             onConfirm = { saved ->
                 onSaveRecipe(saved)
@@ -174,7 +295,7 @@ fun RecipesScreen(
                     showEditor = true
                 },
                 icon = { Text("➕", fontSize = 18.sp) },
-                text = { Text("Nueva Receta / Platillo") }
+                text = { Text(uiConfig.text(UiTextKey.RECIPES_FAB_NEW)) }
             )
         }
     ) { padding ->
@@ -187,7 +308,7 @@ fun RecipesScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    "Aún no tienes recetas guardadas. Pulsa '+ Nueva Receta / Platillo' para crear una receta normal, un pan con porcentaje panadero o un platillo combinado.",
+                    uiConfig.text(UiTextKey.RECIPES_EMPTY_MSG),
                     style = MaterialTheme.typography.bodyLarge
                 )
             }
@@ -204,6 +325,7 @@ fun RecipesScreen(
                         recipe = recipe,
                         pantryMap = pantryMap,
                         recipeMap = recipeMap,
+                        uiConfig = uiConfig,
                         onEdit = {
                             editingRecipe = recipe
                             showEditor = true
@@ -221,16 +343,13 @@ fun RecipeCard(
     recipe: Recipe,
     pantryMap: Map<Long, PantryItem>,
     recipeMap: Map<Long, Recipe>,
+    uiConfig: AppUiConfig,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
-    // 1. Toggle para mostrar u ocultar el desglose general de esta receta
-    var showRecipeBreakdown by remember { mutableStateOf(true) }
-
-    // 2. Estado para recordar qué sub-recetas dentro de este platillo tienen el desglose activado (toggle)
+    // Oculto por defecto como configuraste en la línea 360
+    var showRecipeBreakdown by remember { mutableStateOf(false) }
     val expandedSubRecipes = remember { mutableStateMapOf<Int, Boolean>() }
-
-    // 3. Modo de escalado en Panadería: por Gramos Totales de mezcla (false) o por Cantidad de Piezas (true)
     var scaleByPieces by remember(recipe.id) { mutableStateOf(false) }
 
     var customWeightText by remember(recipe.id, recipe.defaultTargetWeightGrams) {
@@ -259,12 +378,22 @@ fun RecipeCard(
         customWeightText.toDoubleOrNull()?.coerceAtLeast(1.0) ?: recipe.defaultTargetWeightGrams
     }
 
-    val summary = remember(recipe, targetTotalGrams, activeGramsPerPiece, pantryMap, recipeMap) {
+    val summary = remember(
+        recipe,
+        targetTotalGrams,
+        activeGramsPerPiece,
+        pantryMap,
+        recipeMap,
+        uiConfig.subRecipeSymbol,
+        uiConfig.text(UiTextKey.SYMBOL_SCALE)
+    ) {
         RecipeCalculator.calculateRecipe(
             recipe = recipe.copy(gramsPerPiece = activeGramsPerPiece),
             overrideTargetWeightGrams = if (recipe.isBakersPercentage) targetTotalGrams else null,
             pantryMap = pantryMap,
-            recipeMap = recipeMap
+            recipeMap = recipeMap,
+            subRecipeSymbol = uiConfig.subRecipeSymbol,
+            scaleSymbol = uiConfig.text(UiTextKey.SYMBOL_SCALE)
         )
     }
 
@@ -286,23 +415,23 @@ fun RecipeCard(
                             fontWeight = FontWeight.Bold
                         )
                         Spacer(Modifier.width(6.dp))
-                        if (summary.anyHasPrice) Text("💰", fontSize = 16.sp)
-                        if (summary.anyHasNutrition) Text("🧠", fontSize = 16.sp)
+                        if (summary.anyHasPrice) Text(uiConfig.priceSymbol, fontSize = 16.sp)
+                        if (summary.anyHasNutrition) Text(uiConfig.nutritionSymbol, fontSize = 16.sp)
                     }
                     Text(
                         text = if (recipe.isBakersPercentage) {
-                            "🥖 Panadería (% sobre Harina = 100% | 1 pz = ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g)"
+                            "${uiConfig.bakerySymbol} ${uiConfig.text(UiTextKey.RECIPE_SUBTITLE_BAKERY)} | 1 pz = ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g"
                         } else {
-                            "🍽️ Platillo / Receta Estándar"
+                            "${uiConfig.dishSymbol} ${uiConfig.text(UiTextKey.RECIPE_SUBTITLE_STANDARD)}"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
                 }
                 Row {
-                    TextButton(onClick = onEdit) { Text("Editar") }
+                    TextButton(onClick = onEdit) { Text(uiConfig.text(UiTextKey.BTN_EDIT)) }
                     TextButton(onClick = onDelete) {
-                        Text("Borrar", color = MaterialTheme.colorScheme.error)
+                        Text(uiConfig.text(UiTextKey.BTN_DELETE), color = MaterialTheme.colorScheme.error)
                     }
                 }
             }
@@ -316,7 +445,6 @@ fun RecipeCard(
                 )
             }
 
-            // Si es Receta de Panadería con Porcentaje Panadero, mostramos la calculadora por Gramos o por Piezas
             if (recipe.isBakersPercentage) {
                 Spacer(Modifier.height(12.dp))
                 Surface(
@@ -326,7 +454,7 @@ fun RecipeCard(
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
                         Text(
-                            text = "⚖️ ¿Cómo quieres calcular la masa hoy?",
+                            text = "${uiConfig.text(UiTextKey.SYMBOL_SCALE)} ${uiConfig.text(UiTextKey.RECIPE_SCALE_TITLE)}",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -338,7 +466,7 @@ fun RecipeCard(
                                     scaleByPieces = false
                                     customWeightText = RecipeCalculator.formatNumber(targetTotalGrams)
                                 },
-                                label = { Text("Por Gramos de Mezcla") }
+                                label = { Text(uiConfig.text(UiTextKey.RECIPE_SCALE_BY_GRAMS_CHIP)) }
                             )
                             FilterChip(
                                 selected = scaleByPieces,
@@ -347,7 +475,9 @@ fun RecipeCard(
                                     val pz = targetTotalGrams / activeGramsPerPiece
                                     customPieceCountText = RecipeCalculator.formatNumber(pz)
                                 },
-                                label = { Text("🥐 Por Cantidad de Piezas") }
+                                label = {
+                                    Text("${uiConfig.text(UiTextKey.SYMBOL_PIECE)} ${uiConfig.text(UiTextKey.RECIPE_SCALE_BY_PIECES_CHIP)}")
+                                }
                             )
                         }
 
@@ -360,7 +490,7 @@ fun RecipeCard(
                                 OutlinedTextField(
                                     value = customWeightText,
                                     onValueChange = { customWeightText = it },
-                                    label = { Text("Gramos de mezcla (g)") },
+                                    label = { Text(uiConfig.text(UiTextKey.RECIPE_MIX_GRAMS_LABEL)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -375,7 +505,7 @@ fun RecipeCard(
                                 )
                             }
                             Text(
-                                text = "Equivale a ~${RecipeCalculator.formatNumber(summary.totalPieces)} piezas de ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g cada una",
+                                text = "Equivale a ~${RecipeCalculator.formatNumber(summary.totalPieces)} pz de ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g",
                                 style = MaterialTheme.typography.labelSmall,
                                 modifier = Modifier.padding(top = 4.dp)
                             )
@@ -387,7 +517,7 @@ fun RecipeCard(
                                 OutlinedTextField(
                                     value = customPieceCountText,
                                     onValueChange = { customPieceCountText = it },
-                                    label = { Text("¿Cuántas piezas?") },
+                                    label = { Text(uiConfig.text(UiTextKey.RECIPE_HOW_MANY_PIECES_LABEL)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -395,7 +525,7 @@ fun RecipeCard(
                                 OutlinedTextField(
                                     value = customGramsPerPieceText,
                                     onValueChange = { customGramsPerPieceText = it },
-                                    label = { Text("Gramos por 1 pz (g)") },
+                                    label = { Text(uiConfig.text(UiTextKey.RECIPE_GRAMS_PER_PIECE_LABEL)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -419,7 +549,7 @@ fun RecipeCard(
                                 )
                             }
                             Text(
-                                text = "👉 Mezcla total a preparar: ${RecipeCalculator.formatNumber(targetTotalGrams)} g (${RecipeCalculator.formatNumber(activePieceCount)} pz × ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g)",
+                                text = "${uiConfig.text(UiTextKey.RECIPE_TOTAL_MIX_PREFIX)} ${RecipeCalculator.formatNumber(targetTotalGrams)} g (${RecipeCalculator.formatNumber(activePieceCount)} pz × ${RecipeCalculator.formatNumber(activeGramsPerPiece)}g)",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.Bold,
                                 color = MaterialTheme.colorScheme.primary,
@@ -432,14 +562,13 @@ fun RecipeCard(
 
             Spacer(Modifier.height(10.dp))
 
-            // Botón / Switch para Togglear si se desglosa o no esta receta
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Desglose de ingredientes (${summary.rows.size}):",
+                    text = "${uiConfig.text(UiTextKey.RECIPE_INGREDIENTS_HEADER)} (${summary.rows.size}):",
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -447,7 +576,10 @@ fun RecipeCard(
                     selected = showRecipeBreakdown,
                     onClick = { showRecipeBreakdown = !showRecipeBreakdown },
                     label = {
-                        Text(if (showRecipeBreakdown) "🔽 Ocultar desglose" else "▶️ Desglosar receta")
+                        Text(
+                            if (showRecipeBreakdown) uiConfig.text(UiTextKey.RECIPE_COLLAPSE_BREAKDOWN)
+                            else uiConfig.text(UiTextKey.RECIPE_EXPAND_BREAKDOWN)
+                        )
                     }
                 )
             }
@@ -478,20 +610,27 @@ fun RecipeCard(
                                         }
                                     )
                                     Spacer(Modifier.width(6.dp))
-                                    if (row.hasPriceIcon) Text("💰", fontSize = 14.sp)
+                                    if (row.hasPriceIcon) Text(uiConfig.priceSymbol, fontSize = 14.sp)
                                     if (row.hasNutritionIcon) {
                                         Spacer(Modifier.width(2.dp))
-                                        Text("🧠", fontSize = 14.sp)
+                                        Text(uiConfig.nutritionSymbol, fontSize = 14.sp)
                                     }
                                 }
                                 if (row.storeName.isNotBlank()) {
                                     Text(
-                                        text = "🛒 Súper: ${row.storeName}",
+                                        text = "${uiConfig.storeSymbol} ${uiConfig.text(UiTextKey.PANTRY_STORE_PREFIX)} ${row.storeName}",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.secondary
                                     )
                                 }
-                                // Si este renglón es una sub-receta, botón para togglear el desglose de esa sub-receta
+                                if (row.retentionNoteText.isNotBlank()) {
+                                    Text(
+                                        text = row.retentionNoteText,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.tertiary,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
                                 if (row.isSubRecipe && row.subBreakdownRows.isNotEmpty()) {
                                     TextButton(
                                         onClick = { expandedSubRecipes[index] = !isSubExpanded },
@@ -499,9 +638,9 @@ fun RecipeCard(
                                     ) {
                                         Text(
                                             text = if (isSubExpanded) {
-                                                "🔼 Ocultar ingredientes de esta receta"
+                                                uiConfig.text(UiTextKey.RECIPE_SUB_COLLAPSE)
                                             } else {
-                                                "🔽 Desglosar ingredientes de esta receta (${row.subBreakdownRows.size})"
+                                                "${uiConfig.text(UiTextKey.RECIPE_SUB_EXPAND)} (${row.subBreakdownRows.size})"
                                             },
                                             fontSize = 12.sp
                                         )
@@ -524,7 +663,6 @@ fun RecipeCard(
                             }
                         }
 
-                        // Sub-desglose cuando el usuario activa el toggle de una sub-receta
                         if (row.isSubRecipe && isSubExpanded && row.subBreakdownRows.isNotEmpty()) {
                             Surface(
                                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
@@ -535,7 +673,7 @@ fun RecipeCard(
                             ) {
                                 Column(modifier = Modifier.padding(8.dp)) {
                                     Text(
-                                        text = "Desglose proporcional para ${RecipeCalculator.formatNumber(row.exactGramsOrMl)}g de ${row.displayName}:",
+                                        text = "${uiConfig.text(UiTextKey.RECIPE_SUB_PROPORTIONAL_HEADER)} ${RecipeCalculator.formatNumber(row.exactGramsOrMl)}g de ${row.displayName}:",
                                         style = MaterialTheme.typography.labelSmall,
                                         fontWeight = FontWeight.Bold
                                     )
@@ -552,11 +690,11 @@ fun RecipeCard(
                                                     text = "↳ ${subRow.displayName}",
                                                     fontSize = 12.sp
                                                 )
-                                                if (subRow.hasPriceIcon) Text(" 💰", fontSize = 11.sp)
-                                                if (subRow.hasNutritionIcon) Text(" 🧠", fontSize = 11.sp)
+                                                if (subRow.hasPriceIcon) Text(" ${uiConfig.priceSymbol}", fontSize = 11.sp)
+                                                if (subRow.hasNutritionIcon) Text(" ${uiConfig.nutritionSymbol}", fontSize = 11.sp)
                                                 if (subRow.storeName.isNotBlank()) {
                                                     Text(
-                                                        text = " (🛒 ${subRow.storeName})",
+                                                        text = " (${uiConfig.storeSymbol} ${subRow.storeName})",
                                                         fontSize = 11.sp,
                                                         color = MaterialTheme.colorScheme.secondary
                                                     )
@@ -579,7 +717,6 @@ fun RecipeCard(
             }
 
             Spacer(Modifier.height(12.dp))
-            // Resumen de Peso, Piezas y Costo Total
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -587,20 +724,20 @@ fun RecipeCard(
             ) {
                 Column {
                     Text(
-                        text = "Peso total: ${RecipeCalculator.formatNumber(summary.totalWeightGramsOrMl)} g",
+                        text = "${uiConfig.text(UiTextKey.RECIPE_FINAL_WEIGHT_LABEL)} ${RecipeCalculator.formatNumber(summary.totalWeightGramsOrMl)} g",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold
                     )
                     if (recipe.isBakersPercentage && summary.totalPieces > 0) {
                         Text(
-                            text = "Piezas: ${RecipeCalculator.formatNumber(summary.totalPieces)} pz ($${RecipeCalculator.formatNumber(summary.costPerPiece)} / pz)",
+                            text = "${uiConfig.text(UiTextKey.RECIPE_PIECES_SUMMARY_LABEL)} ${RecipeCalculator.formatNumber(summary.totalPieces)} pz ($${RecipeCalculator.formatNumber(summary.costPerPiece)} / pz)",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.secondary
                         )
                     }
                 }
                 Text(
-                    text = "💰 Costo aprox: $${RecipeCalculator.formatNumber(summary.totalCost)}",
+                    text = "${uiConfig.priceSymbol} ${uiConfig.text(UiTextKey.RECIPE_APPROX_COST_LABEL)} $${RecipeCalculator.formatNumber(summary.totalCost)}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.primary
@@ -613,8 +750,8 @@ fun RecipeCard(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    if (showNutritionTable) "Ocultar Tabla Nutrimental 🧠"
-                    else "Ver Tabla Nutrimental Aproximada 🧠"
+                    if (showNutritionTable) "${uiConfig.text(UiTextKey.RECIPE_HIDE_NUTRITION_BTN)} ${uiConfig.nutritionSymbol}"
+                    else "${uiConfig.text(UiTextKey.RECIPE_SHOW_NUTRITION_BTN)} ${uiConfig.nutritionSymbol}"
                 )
             }
 
@@ -623,7 +760,8 @@ fun RecipeCard(
                 NutritionTableView(
                     totalNutrition = summary.totalNutrition,
                     per100gNutrition = summary.nutritionPer100g,
-                    totalWeightGrams = summary.totalWeightGramsOrMl
+                    totalWeightGrams = summary.totalWeightGramsOrMl,
+                    uiConfig = uiConfig
                 )
             }
         }
@@ -634,7 +772,8 @@ fun RecipeCard(
 fun NutritionTableView(
     totalNutrition: NutritionInfo,
     per100gNutrition: NutritionInfo,
-    totalWeightGrams: Double
+    totalWeightGrams: Double,
+    uiConfig: AppUiConfig
 ) {
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
@@ -643,22 +782,22 @@ fun NutritionTableView(
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
-                text = "🧠 Información Nutrimental Aproximada",
+                text = "${uiConfig.nutritionSymbol} ${uiConfig.text(UiTextKey.NUTRITION_TABLE_TITLE)}",
                 style = MaterialTheme.typography.titleSmall,
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "Calculada con los ingredientes que tienen 🧠 registrado",
+                text = uiConfig.text(UiTextKey.NUTRITION_TABLE_SUBTITLE),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.height(8.dp))
 
             Row(modifier = Modifier.fillMaxWidth()) {
-                Text("Nutriente", modifier = Modifier.weight(1.4f), fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                Text("Por 100g", modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(uiConfig.text(UiTextKey.NUTRITION_COL_NUTRIENT), modifier = Modifier.weight(1.4f), fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(uiConfig.text(UiTextKey.NUTRITION_COL_PER100G), modifier = Modifier.weight(1f), fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Text(
-                    "Total (${RecipeCalculator.formatNumber(totalWeightGrams)}g)",
+                    "${uiConfig.text(UiTextKey.NUTRITION_COL_TOTAL)} (${RecipeCalculator.formatNumber(totalWeightGrams)}g)",
                     modifier = Modifier.weight(1f),
                     fontWeight = FontWeight.Bold,
                     fontSize = 13.sp
@@ -666,26 +805,49 @@ fun NutritionTableView(
             }
             HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-            val orderedRows = listOf(
-                Triple("1. Energía (Calorías)", "${RecipeCalculator.formatNumber(per100gNutrition.caloriesKcal)} kcal", "${RecipeCalculator.formatNumber(totalNutrition.caloriesKcal)} kcal"),
-                Triple("2. Proteínas", "${RecipeCalculator.formatNumber(per100gNutrition.proteinG)} g", "${RecipeCalculator.formatNumber(totalNutrition.proteinG)} g"),
-                Triple("3. Grasas / Lípidos Totales", "${RecipeCalculator.formatNumber(per100gNutrition.totalFatG)} g", "${RecipeCalculator.formatNumber(totalNutrition.totalFatG)} g"),
-                Triple("   • Grasas Saturadas", "${RecipeCalculator.formatNumber(per100gNutrition.saturatedFatG)} g", "${RecipeCalculator.formatNumber(totalNutrition.saturatedFatG)} g"),
-                Triple("4. Carbohidratos", "${RecipeCalculator.formatNumber(per100gNutrition.carbsG)} g", "${RecipeCalculator.formatNumber(totalNutrition.carbsG)} g"),
-                Triple("   • Azúcares", "${RecipeCalculator.formatNumber(per100gNutrition.sugarsG)} g", "${RecipeCalculator.formatNumber(totalNutrition.sugarsG)} g"),
-                Triple("5. Fibra Dietética", "${RecipeCalculator.formatNumber(per100gNutrition.fiberG)} g", "${RecipeCalculator.formatNumber(totalNutrition.fiberG)} g"),
-                Triple("6. Sodio", "${RecipeCalculator.formatNumber(per100gNutrition.sodiumMg)} mg", "${RecipeCalculator.formatNumber(totalNutrition.sodiumMg)} mg")
-            )
+            val orderedRows = buildList {
+                if (uiConfig.showCalories) {
+                    add(Triple("Energía (Calorías)", "${RecipeCalculator.formatNumber(per100gNutrition.caloriesKcal)} kcal", "${RecipeCalculator.formatNumber(totalNutrition.caloriesKcal)} kcal"))
+                }
+                if (uiConfig.showProtein) {
+                    add(Triple("Proteínas", "${RecipeCalculator.formatNumber(per100gNutrition.proteinG)} g", "${RecipeCalculator.formatNumber(totalNutrition.proteinG)} g"))
+                }
+                if (uiConfig.showTotalFat) {
+                    add(Triple("Grasas / Lípidos Totales", "${RecipeCalculator.formatNumber(per100gNutrition.totalFatG)} g", "${RecipeCalculator.formatNumber(totalNutrition.totalFatG)} g"))
+                }
+                if (uiConfig.showSaturatedFat) {
+                    add(Triple("   • Grasas Saturadas", "${RecipeCalculator.formatNumber(per100gNutrition.saturatedFatG)} g", "${RecipeCalculator.formatNumber(totalNutrition.saturatedFatG)} g"))
+                }
+                if (uiConfig.showCarbs) {
+                    add(Triple("Carbohidratos", "${RecipeCalculator.formatNumber(per100gNutrition.carbsG)} g", "${RecipeCalculator.formatNumber(totalNutrition.carbsG)} g"))
+                }
+                if (uiConfig.showSugars) {
+                    add(Triple("   • Azúcares", "${RecipeCalculator.formatNumber(per100gNutrition.sugarsG)} g", "${RecipeCalculator.formatNumber(totalNutrition.sugarsG)} g"))
+                }
+                if (uiConfig.showFiber) {
+                    add(Triple("Fibra Dietética", "${RecipeCalculator.formatNumber(per100gNutrition.fiberG)} g", "${RecipeCalculator.formatNumber(totalNutrition.fiberG)} g"))
+                }
+                if (uiConfig.showSodium) {
+                    add(Triple("Sodio", "${RecipeCalculator.formatNumber(per100gNutrition.sodiumMg)} mg", "${RecipeCalculator.formatNumber(totalNutrition.sodiumMg)} mg"))
+                }
+            }
 
-            orderedRows.forEach { (label, per100, total) ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 2.dp)
-                ) {
-                    Text(label, modifier = Modifier.weight(1.4f), fontSize = 12.sp)
-                    Text(per100, modifier = Modifier.weight(1f), fontSize = 12.sp)
-                    Text(total, modifier = Modifier.weight(1f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            if (orderedRows.isEmpty()) {
+                Text(
+                    "Todos los renglones de la tabla nutrimental están desactivados en Configuración.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            } else {
+                orderedRows.forEach { (label, per100, total) ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp)
+                    ) {
+                        Text(label, modifier = Modifier.weight(1.4f), fontSize = 12.sp)
+                        Text(per100, modifier = Modifier.weight(1f), fontSize = 12.sp)
+                        Text(total, modifier = Modifier.weight(1f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
                 }
             }
         }
@@ -698,6 +860,7 @@ fun RecipeEditorDialog(
     initialRecipe: Recipe?,
     allRecipes: List<Recipe>,
     pantryItems: List<PantryItem>,
+    uiConfig: AppUiConfig,
     onDismiss: () -> Unit,
     onConfirm: (Recipe) -> Unit
 ) {
@@ -723,11 +886,15 @@ fun RecipeEditorDialog(
     var amountInput by remember { mutableStateOf("100") }
     var selectedUnit by remember { mutableStateOf(MeasureUnit.GRAMS) }
     var isBaseFlour by remember { mutableStateOf(false) }
+    var weightRetentionInput by remember { mutableStateOf("100") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(if (initialRecipe == null) "Nueva Receta o Platillo" else "Editar Receta o Platillo")
+            Text(
+                if (initialRecipe == null) uiConfig.text(UiTextKey.RECIPE_DIALOG_NEW_TITLE)
+                else uiConfig.text(UiTextKey.RECIPE_DIALOG_EDIT_TITLE)
+            )
         },
         text = {
             Column(
@@ -739,7 +906,7 @@ fun RecipeEditorDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Nombre de la receta o platillo") },
+                    label = { Text(uiConfig.text(UiTextKey.RECIPE_FIELD_NAME)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -747,11 +914,10 @@ fun RecipeEditorDialog(
                 OutlinedTextField(
                     value = notes,
                     onValueChange = { notes = it },
-                    label = { Text("Notas / Preparación (opcional)") },
+                    label = { Text(uiConfig.text(UiTextKey.RECIPE_FIELD_NOTES)) },
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Selector de Modo: Normal vs Porcentaje Panadero + Peso por pieza
                 Surface(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     shape = RoundedCornerShape(8.dp),
@@ -764,9 +930,12 @@ fun RecipeEditorDialog(
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
-                                Text("🥖 Modo Porcentaje Panadero", fontWeight = FontWeight.Bold)
                                 Text(
-                                    "Harina base = 100%, los demás ingredientes van en % respecto a la harina.",
+                                    "${uiConfig.bakerySymbol} ${uiConfig.text(UiTextKey.RECIPE_BAKERS_MODE_TITLE)}",
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    uiConfig.text(UiTextKey.RECIPE_BAKERS_MODE_DESC),
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
@@ -781,7 +950,7 @@ fun RecipeEditorDialog(
                                 OutlinedTextField(
                                     value = defaultTargetWeight,
                                     onValueChange = { defaultTargetWeight = it },
-                                    label = { Text("Mezcla base (g)") },
+                                    label = { Text(uiConfig.text(UiTextKey.RECIPE_BASE_MIX_FIELD)) },
                                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                     singleLine = true,
                                     modifier = Modifier.weight(1f)
@@ -790,29 +959,27 @@ fun RecipeEditorDialog(
                             OutlinedTextField(
                                 value = gramsPerPiece,
                                 onValueChange = { gramsPerPiece = it },
-                                label = { Text("🥐 Gramos por 1 pieza (g)") },
+                                label = {
+                                    Text("${uiConfig.text(UiTextKey.SYMBOL_PIECE)} ${uiConfig.text(UiTextKey.RECIPE_GRAMS_PER_PIECE_LABEL)}")
+                                },
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 singleLine = true,
                                 modifier = Modifier.weight(1f)
                             )
                         }
-                        Text(
-                            text = "Indicar cuántos gramos pesa 1 pieza (ej. 80g o 100g) te permite cocinar calculando por número de piezas.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 4.dp)
-                        )
                     }
                 }
 
                 HorizontalDivider()
-                Text("Agregar ingrediente o sub-receta:", fontWeight = FontWeight.Bold)
+                Text(uiConfig.text(UiTextKey.RECIPE_ADD_COMPONENT_HEADER), fontWeight = FontWeight.Bold)
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = addingSourceType == ComponentSourceType.PANTRY_INGREDIENT,
                         onClick = { addingSourceType = ComponentSourceType.PANTRY_INGREDIENT },
-                        label = { Text("🧺 De Despensa") }
+                        label = {
+                            Text("${uiConfig.text(UiTextKey.PANTRY_TAB_ICON)} ${uiConfig.text(UiTextKey.RECIPE_FROM_PANTRY_CHIP)}")
+                        }
                     )
                     FilterChip(
                         selected = addingSourceType == ComponentSourceType.SUB_RECIPE,
@@ -822,7 +989,9 @@ fun RecipeEditorDialog(
                                 selectedSubRecipeId = availableSubRecipes.first().id
                             }
                         },
-                        label = { Text("🍲 De otra Receta") }
+                        label = {
+                            Text("${uiConfig.subRecipeSymbol} ${uiConfig.text(UiTextKey.RECIPE_FROM_SUBRECIPE_CHIP)}")
+                        }
                     )
                 }
 
@@ -833,7 +1002,7 @@ fun RecipeEditorDialog(
                             color = MaterialTheme.colorScheme.error
                         )
                     } else {
-                        Text("Selecciona el ingrediente:", style = MaterialTheme.typography.labelMedium)
+                        Text(uiConfig.text(UiTextKey.RECIPE_SELECT_INGREDIENT_LABEL), style = MaterialTheme.typography.labelMedium)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -842,8 +1011,8 @@ fun RecipeEditorDialog(
                         ) {
                             pantryItems.forEach { item ->
                                 val icons = buildString {
-                                    if (item.hasPrice) append("💰")
-                                    if (item.hasNutrition) append("🧠")
+                                    if (item.hasPrice) append(uiConfig.priceSymbol)
+                                    if (item.hasNutrition) append(uiConfig.nutritionSymbol)
                                 }
                                 FilterChip(
                                     selected = selectedPantryId == item.id,
@@ -863,7 +1032,7 @@ fun RecipeEditorDialog(
                             color = MaterialTheme.colorScheme.error
                         )
                     } else {
-                        Text("Selecciona la receta a incluir:", style = MaterialTheme.typography.labelMedium)
+                        Text(uiConfig.text(UiTextKey.RECIPE_SELECT_SUBRECIPE_LABEL), style = MaterialTheme.typography.labelMedium)
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -875,7 +1044,7 @@ fun RecipeEditorDialog(
                                     selected = selectedSubRecipeId == sub.id,
                                     onClick = { selectedSubRecipeId = sub.id },
                                     label = {
-                                        Text("🍲 ${sub.name} (1 pz=${RecipeCalculator.formatNumber(sub.gramsPerPiece)}g)")
+                                        Text("${uiConfig.subRecipeSymbol} ${sub.name} (1 pz=${RecipeCalculator.formatNumber(sub.gramsPerPiece)}g)")
                                     }
                                 )
                             }
@@ -888,8 +1057,8 @@ fun RecipeEditorDialog(
                     onValueChange = { amountInput = it },
                     label = {
                         Text(
-                            if (isBakersMode) "Porcentaje respecto a harina (%) - Ej. 100 harina, 65 agua"
-                            else "Cantidad (${selectedUnit.label})"
+                            if (isBakersMode) uiConfig.text(UiTextKey.RECIPE_PERCENTAGE_FIELD_LABEL)
+                            else "${uiConfig.text(UiTextKey.RECIPE_AMOUNT_FIELD_LABEL)} (${selectedUnit.label})"
                         )
                     },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -914,6 +1083,56 @@ fun RecipeEditorDialog(
                     }
                 }
 
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(10.dp)) {
+                        Text(
+                            text = "${uiConfig.text(UiTextKey.SYMBOL_RETENTION)} ${uiConfig.text(UiTextKey.RECIPE_RETENTION_TITLE)}",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = uiConfig.text(UiTextKey.RECIPE_RETENTION_DESC),
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = weightRetentionInput,
+                            onValueChange = { weightRetentionInput = it },
+                            label = { Text(uiConfig.text(UiTextKey.RECIPE_RETENTION_FIELD_LABEL)) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            AssistChip(
+                                onClick = { weightRetentionInput = "100" },
+                                label = { Text("100%") }
+                            )
+                            AssistChip(
+                                onClick = { weightRetentionInput = "50" },
+                                label = { Text("50%") }
+                            )
+                            AssistChip(
+                                onClick = { weightRetentionInput = "10" },
+                                label = { Text("10%") }
+                            )
+                            AssistChip(
+                                onClick = { weightRetentionInput = "0" },
+                                label = { Text("0%") }
+                            )
+                        }
+                    }
+                }
+
                 if (isBakersMode && addingSourceType == ComponentSourceType.PANTRY_INGREDIENT) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(
@@ -923,7 +1142,7 @@ fun RecipeEditorDialog(
                                 if (it) amountInput = "100"
                             }
                         )
-                        Text("Es la harina base (100%)", style = MaterialTheme.typography.bodySmall)
+                        Text(uiConfig.text(UiTextKey.RECIPE_BASE_FLOUR_CHECKBOX), style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
@@ -931,53 +1150,65 @@ fun RecipeEditorDialog(
                     onClick = {
                         val amt = amountInput.toDoubleOrNull() ?: return@Button
                         if (amt <= 0.0) return@Button
+                        val retPct = weightRetentionInput.toDoubleOrNull()?.coerceAtLeast(0.0) ?: 100.0
+
                         if (addingSourceType == ComponentSourceType.PANTRY_INGREDIENT && selectedPantryId != 0L) {
                             components = components + RecipeComponent(
                                 sourceType = ComponentSourceType.PANTRY_INGREDIENT,
                                 referenceId = selectedPantryId,
                                 amountOrPercentage = amt,
                                 unit = if (isBakersMode) MeasureUnit.GRAMS else selectedUnit,
-                                isBaseFlourInBakersMode = isBakersMode && isBaseFlour
+                                isBaseFlourInBakersMode = isBakersMode && isBaseFlour,
+                                weightRetentionPercent = retPct
                             )
                             isBaseFlour = false
+                            weightRetentionInput = "100"
                         } else if (addingSourceType == ComponentSourceType.SUB_RECIPE && selectedSubRecipeId != 0L) {
                             val subUnit = if (isBakersMode) MeasureUnit.GRAMS else selectedUnit
                             components = components + RecipeComponent(
                                 sourceType = ComponentSourceType.SUB_RECIPE,
                                 referenceId = selectedSubRecipeId,
                                 amountOrPercentage = amt,
-                                unit = subUnit
+                                unit = subUnit,
+                                weightRetentionPercent = retPct
                             )
+                            weightRetentionInput = "100"
                         }
                     },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("➕ Agregar a la lista de esta receta")
+                    Text(uiConfig.text(UiTextKey.RECIPE_ADD_TO_LIST_BTN))
                 }
 
                 HorizontalDivider()
-                Text("Componentes actuales (${components.size}):", fontWeight = FontWeight.Bold)
+                Text(
+                    "${uiConfig.text(UiTextKey.RECIPE_CURRENT_COMPONENTS_HEADER)} (${components.size}):",
+                    fontWeight = FontWeight.Bold
+                )
 
                 components.forEachIndexed { idx, comp ->
                     val label = if (comp.sourceType == ComponentSourceType.PANTRY_INGREDIENT) {
                         val item = pantryItems.find { it.id == comp.referenceId }
                         val icons = buildString {
-                            if (item?.hasPrice == true) append("💰")
-                            if (item?.hasNutrition == true) append("🧠")
+                            if (item?.hasPrice == true) append(uiConfig.priceSymbol)
+                            if (item?.hasNutrition == true) append(uiConfig.nutritionSymbol)
                         }
                         "${item?.name ?: "Ingrediente"} $icons"
                     } else {
                         val sub = allRecipes.find { it.id == comp.referenceId }
-                        "🍲 ${sub?.name ?: "Receta"}"
+                        "${uiConfig.subRecipeSymbol} ${sub?.name ?: "Receta"}"
                     }
                     val unitTxt = if (isBakersMode) "%" else comp.unit.symbol
+                    val retTxt = if (comp.weightRetentionPercent != 100.0) {
+                        " [${RecipeCalculator.formatNumber(comp.weightRetentionPercent)}%]"
+                    } else ""
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "• $label: ${RecipeCalculator.formatNumber(comp.amountOrPercentage)} $unitTxt",
+                            text = "• $label: ${RecipeCalculator.formatNumber(comp.amountOrPercentage)} $unitTxt$retTxt",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodySmall
                         )
@@ -986,7 +1217,7 @@ fun RecipeEditorDialog(
                                 components = components.toMutableList().also { it.removeAt(idx) }
                             }
                         ) {
-                            Text("Quitar", color = MaterialTheme.colorScheme.error)
+                            Text(uiConfig.text(UiTextKey.BTN_REMOVE), color = MaterialTheme.colorScheme.error)
                         }
                     }
                 }
@@ -1009,23 +1240,24 @@ fun RecipeEditorDialog(
                     )
                 }
             ) {
-                Text("Guardar Receta")
+                Text(uiConfig.text(UiTextKey.BTN_SAVE))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancelar") }
+            TextButton(onClick = onDismiss) { Text(uiConfig.text(UiTextKey.BTN_CANCEL)) }
         }
     )
 }
 
 // =========================================================================
-// PESTAÑA 2: DESPENSA (CON SUPERMERCADO 🛒, PRECIOS 💰, NUTRICIÓN 🧠 Y PIEZAS)
+// APARTADO 2: DESPENSA
 // =========================================================================
 
 @Composable
 fun PantryScreen(
     pantryItems: List<PantryItem>,
     geminiApiKey: String,
+    uiConfig: AppUiConfig,
     onSaveItem: (PantryItem) -> Unit,
     onDeleteItem: (Long) -> Unit
 ) {
@@ -1047,6 +1279,7 @@ fun PantryScreen(
         PantryItemEditorDialog(
             initialItem = editingItem,
             geminiApiKey = geminiApiKey,
+            uiConfig = uiConfig,
             onDismiss = { showEditor = false },
             onConfirm = { saved ->
                 onSaveItem(saved)
@@ -1058,6 +1291,7 @@ fun PantryScreen(
     if (showCatalogDialog) {
         CatalogImportDialog(
             existingNames = pantryItems.map { it.name.lowercase() }.toSet(),
+            uiConfig = uiConfig,
             onImportItem = { item -> onSaveItem(item) },
             onDismiss = { showCatalogDialog = false }
         )
@@ -1074,7 +1308,7 @@ fun PantryScreen(
                     containerColor = MaterialTheme.colorScheme.secondaryContainer
                 ) {
                     Row(modifier = Modifier.padding(horizontal = 12.dp)) {
-                        Text("📦 Importar de Catálogo (Verduras/Básicos)")
+                        Text("${uiConfig.text(UiTextKey.SYMBOL_CATALOG)} ${uiConfig.text(UiTextKey.PANTRY_FAB_CATALOG)}")
                     }
                 }
                 ExtendedFloatingActionButton(
@@ -1083,7 +1317,7 @@ fun PantryScreen(
                         showEditor = true
                     },
                     icon = { Text("➕", fontSize = 18.sp) },
-                    text = { Text("Nuevo Ingrediente") }
+                    text = { Text(uiConfig.text(UiTextKey.PANTRY_FAB_NEW)) }
                 )
             }
         }
@@ -1097,7 +1331,7 @@ fun PantryScreen(
         ) {
             item {
                 Text(
-                    text = "Leyenda: 💰 = Precio | 🧠 = Tabla nutrimental | 🛒 = Súper donde lo compras",
+                    text = "${uiConfig.text(UiTextKey.PANTRY_LEGEND_PREFIX)} ${uiConfig.priceSymbol} = Precio | ${uiConfig.nutritionSymbol} = Nutrición | ${uiConfig.storeSymbol} = Súper",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -1113,7 +1347,7 @@ fun PantryScreen(
                         FilterChip(
                             selected = selectedStoreFilter == null,
                             onClick = { selectedStoreFilter = null },
-                            label = { Text("Todos (${pantryItems.size})") }
+                            label = { Text("${uiConfig.text(UiTextKey.PANTRY_FILTER_ALL)} (${pantryItems.size})") }
                         )
                         availableStores.forEach { store ->
                             FilterChip(
@@ -1121,7 +1355,7 @@ fun PantryScreen(
                                 onClick = {
                                     selectedStoreFilter = if (selectedStoreFilter == store) null else store
                                 },
-                                label = { Text("🛒 $store") }
+                                label = { Text("${uiConfig.storeSymbol} $store") }
                             )
                         }
                     }
@@ -1130,6 +1364,7 @@ fun PantryScreen(
             items(filteredItems, key = { it.id }) { item ->
                 PantryItemCard(
                     item = item,
+                    uiConfig = uiConfig,
                     onEdit = {
                         editingItem = item
                         showEditor = true
@@ -1144,6 +1379,7 @@ fun PantryScreen(
 @Composable
 fun PantryItemCard(
     item: PantryItem,
+    uiConfig: AppUiConfig,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -1183,32 +1419,33 @@ fun PantryItemCard(
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(Modifier.width(6.dp))
-                    if (item.hasPrice) Text("💰", fontSize = 16.sp)
+                    if (item.hasPrice) Text(uiConfig.priceSymbol, fontSize = 16.sp)
                     if (item.hasNutrition) {
                         Spacer(Modifier.width(2.dp))
-                        Text("🧠", fontSize = 16.sp)
+                        Text(uiConfig.nutritionSymbol, fontSize = 16.sp)
                     }
                 }
 
                 if (item.storeName.isNotBlank()) {
                     Text(
-                        text = "🛒 Súper: ${item.storeName}",
+                        text = "${uiConfig.storeSymbol} ${uiConfig.text(UiTextKey.PANTRY_STORE_PREFIX)} ${item.storeName}",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.tertiary,
                         fontWeight = FontWeight.SemiBold
                     )
                 }
 
+                // Solo se muestra la equivalencia de piezas si `defaultUnit == MeasureUnit.PIECES`
                 val unitInfo = if (item.defaultUnit == MeasureUnit.PIECES) {
-                    "Se mide por Piezas (1 pz ≈ ${RecipeCalculator.formatNumber(item.amountPerPiece)} ${item.pieceEquivalenceUnit.symbol})"
+                    "${uiConfig.text(UiTextKey.PANTRY_UNIT_PIECES_PREFIX)} (1 pz ≈ ${RecipeCalculator.formatNumber(item.amountPerPiece)} ${item.pieceEquivalenceUnit.symbol})"
                 } else {
-                    "Unidad base: ${item.defaultUnit.label} (1 pz ≈ ${RecipeCalculator.formatNumber(item.amountPerPiece)} ${item.pieceEquivalenceUnit.symbol})"
+                    "${uiConfig.text(UiTextKey.PANTRY_UNIT_BASE_PREFIX)} ${item.defaultUnit.label}"
                 }
                 Text(text = unitInfo, style = MaterialTheme.typography.bodySmall)
 
                 if (item.hasPrice) {
                     Text(
-                        text = "💰 Costo: $${RecipeCalculator.formatNumber(item.priceCost)} por cada ${RecipeCalculator.formatNumber(item.priceReferenceAmount)} ${item.priceReferenceUnit.symbol}",
+                        text = "${uiConfig.priceSymbol} ${uiConfig.text(UiTextKey.PANTRY_COST_PREFIX)} $${RecipeCalculator.formatNumber(item.priceCost)} / ${RecipeCalculator.formatNumber(item.priceReferenceAmount)} ${item.priceReferenceUnit.symbol}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Medium
@@ -1216,8 +1453,9 @@ fun PantryItemCard(
                 }
                 if (item.hasNutrition) {
                     val n = item.nutritionPer100gOrMl
+                    val baseSym = if (item.defaultUnit == MeasureUnit.MILLILITERS) "ml" else "g"
                     Text(
-                        text = "🧠 Por 100${item.pieceEquivalenceUnit.symbol}: ${RecipeCalculator.formatNumber(n.caloriesKcal)} kcal | Prot: ${RecipeCalculator.formatNumber(n.proteinG)}g | Carb: ${RecipeCalculator.formatNumber(n.carbsG)}g | Grasa: ${RecipeCalculator.formatNumber(n.totalFatG)}g",
+                        text = "${uiConfig.nutritionSymbol} 100$baseSym: ${RecipeCalculator.formatNumber(n.caloriesKcal)} kcal | Prot: ${RecipeCalculator.formatNumber(n.proteinG)}g | Carb: ${RecipeCalculator.formatNumber(n.carbsG)}g | Grasa: ${RecipeCalculator.formatNumber(n.totalFatG)}g",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.secondary
                     )
@@ -1225,9 +1463,9 @@ fun PantryItemCard(
             }
 
             Column {
-                TextButton(onClick = onEdit) { Text("Editar") }
+                TextButton(onClick = onEdit) { Text(uiConfig.text(UiTextKey.BTN_EDIT)) }
                 TextButton(onClick = onDelete) {
-                    Text("Borrar", color = MaterialTheme.colorScheme.error)
+                    Text(uiConfig.text(UiTextKey.BTN_DELETE), color = MaterialTheme.colorScheme.error)
                 }
             }
         }
@@ -1238,6 +1476,7 @@ fun PantryItemCard(
 fun PantryItemEditorDialog(
     initialItem: PantryItem?,
     geminiApiKey: String,
+    uiConfig: AppUiConfig,
     onDismiss: () -> Unit,
     onConfirm: (PantryItem) -> Unit
 ) {
@@ -1375,7 +1614,10 @@ fun PantryItemEditorDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(if (initialItem == null) "Nuevo Ingrediente en Despensa" else "Editar Ingrediente")
+            Text(
+                if (initialItem == null) uiConfig.text(UiTextKey.PANTRY_DIALOG_NEW_TITLE)
+                else uiConfig.text(UiTextKey.PANTRY_DIALOG_EDIT_TITLE)
+            )
         },
         text = {
             Column(
@@ -1387,16 +1629,15 @@ fun PantryItemEditorDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Nombre del ingrediente (ej. Harina, Huevo, Carne)") },
+                    label = { Text(uiConfig.text(UiTextKey.PANTRY_FIELD_NAME)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
 
-                // Campo de Supermercado / Tienda donde lo compra
                 OutlinedTextField(
                     value = storeName,
                     onValueChange = { storeName = it },
-                    label = { Text("🛒 ¿En qué súper o tienda lo compras? (Opcional)") },
+                    label = { Text("${uiConfig.storeSymbol} ${uiConfig.text(UiTextKey.PANTRY_FIELD_STORE)}") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -1414,8 +1655,13 @@ fun PantryItemEditorDialog(
                     }
                 }
 
-                Text("¿Cómo se mide normalmente?", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(uiConfig.text(UiTextKey.PANTRY_HOW_MEASURED_LABEL), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     MeasureUnit.entries.forEach { u ->
                         FilterChip(
                             selected = defaultUnit == u,
@@ -1431,41 +1677,35 @@ fun PantryItemEditorDialog(
                     }
                 }
 
-                Surface(
-                    color = if (defaultUnit == MeasureUnit.PIECES) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = if (defaultUnit == MeasureUnit.PIECES) {
-                                "⚖️ Equivalencia obligatoria por Pieza (¿cuánto pesa o qué volumen ocupa 1 pieza en promedio?)"
-                            } else {
-                                "⚖️ Equivalencia opcional si llegas a usarlo por Pieza:"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = amountPerPiece,
-                            onValueChange = { amountPerPiece = it },
-                            label = { Text("1 pieza equivale a:") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            singleLine = true,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PieceEquivalenceUnit.entries.forEach { pu ->
-                                FilterChip(
-                                    selected = pieceEquivUnit == pu,
-                                    onClick = { pieceEquivUnit = pu },
-                                    label = { Text(pu.label) }
-                                )
+                if (defaultUnit == MeasureUnit.PIECES) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(12.dp)) {
+                            Text(
+                                text = "${uiConfig.text(UiTextKey.SYMBOL_SCALE)} ${uiConfig.text(UiTextKey.PANTRY_PIECE_EQUIV_TITLE)}",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            OutlinedTextField(
+                                value = amountPerPiece,
+                                onValueChange = { amountPerPiece = it },
+                                label = { Text(uiConfig.text(UiTextKey.PANTRY_PIECE_EQUIV_FIELD)) },
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                singleLine = true,
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                PieceEquivalenceUnit.entries.forEach { pu ->
+                                    FilterChip(
+                                        selected = pieceEquivUnit == pu,
+                                        onClick = { pieceEquivUnit = pu },
+                                        label = { Text(pu.label) }
+                                    )
+                                }
                             }
                         }
                     }
@@ -1483,10 +1723,13 @@ fun PantryItemEditorDialog(
                             )
                         }
                     ) {
-                        Text(if (photoPath == null) "🖼️ Agregar Foto (Opcional)" else "🖼️ Cambiar Foto")
+                        Text(
+                            if (photoPath == null) uiConfig.text(UiTextKey.PANTRY_ADD_PHOTO_BTN)
+                            else uiConfig.text(UiTextKey.PANTRY_CHANGE_PHOTO_BTN)
+                        )
                     }
                     if (photoPath != null) {
-                        Text("✅ Foto guardada", style = MaterialTheme.typography.bodySmall)
+                        Text(uiConfig.text(UiTextKey.PANTRY_PHOTO_SAVED_LABEL), style = MaterialTheme.typography.bodySmall)
                     }
                 }
 
@@ -1497,7 +1740,10 @@ fun PantryItemEditorDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("💰 Registrar Precio", fontWeight = FontWeight.Bold)
+                    Text(
+                        "${uiConfig.priceSymbol} ${uiConfig.text(UiTextKey.PANTRY_REGISTER_PRICE_TITLE)}",
+                        fontWeight = FontWeight.Bold
+                    )
                     Switch(checked = hasPrice, onCheckedChange = { hasPrice = it })
                 }
 
@@ -1506,7 +1752,7 @@ fun PantryItemEditorDialog(
                         OutlinedTextField(
                             value = priceCost,
                             onValueChange = { priceCost = it },
-                            label = { Text("Costo ($)") },
+                            label = { Text(uiConfig.text(UiTextKey.PANTRY_PRICE_COST_FIELD)) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -1514,7 +1760,7 @@ fun PantryItemEditorDialog(
                         OutlinedTextField(
                             value = priceRefAmount,
                             onValueChange = { priceRefAmount = it },
-                            label = { Text("Por cantidad") },
+                            label = { Text(uiConfig.text(UiTextKey.PANTRY_PRICE_REF_FIELD)) },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true,
                             modifier = Modifier.weight(1f)
@@ -1538,7 +1784,10 @@ fun PantryItemEditorDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("🧠 Información Nutrimental (por 100g/ml)", fontWeight = FontWeight.Bold)
+                    Text(
+                        "${uiConfig.nutritionSymbol} ${uiConfig.text(UiTextKey.PANTRY_REGISTER_NUTRITION_TITLE)}",
+                        fontWeight = FontWeight.Bold
+                    )
                     Switch(checked = hasNutrition, onCheckedChange = { hasNutrition = it })
                 }
 
@@ -1549,7 +1798,7 @@ fun PantryItemEditorDialog(
                 ) {
                     Column(modifier = Modifier.padding(10.dp)) {
                         Text(
-                            "🤖 Autocompletar con Gemini IA (baja la resolución a 768px para ahorrar créditos):",
+                            uiConfig.text(UiTextKey.PANTRY_GEMINI_SCAN_HEADER),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -1564,7 +1813,7 @@ fun PantryItemEditorDialog(
                                 enabled = !isScanningAi,
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text("🖼️ Foto de Galería", fontSize = 12.sp)
+                                Text(uiConfig.text(UiTextKey.PANTRY_SCAN_GALLERY_BTN), fontSize = 12.sp)
                             }
                             Button(
                                 onClick = {
@@ -1581,7 +1830,7 @@ fun PantryItemEditorDialog(
                                 enabled = !isScanningAi,
                                 modifier = Modifier.weight(1f)
                             ) {
-                                Text("📷 Tomar Foto", fontSize = 12.sp)
+                                Text(uiConfig.text(UiTextKey.PANTRY_SCAN_CAMERA_BTN), fontSize = 12.sp)
                             }
                         }
                         if (isScanningAi) {
@@ -1600,7 +1849,7 @@ fun PantryItemEditorDialog(
 
                 if (hasNutrition) {
                     Text(
-                        "Valores por cada 100g o 100ml:",
+                        uiConfig.text(UiTextKey.PANTRY_NUTRITION_VALUES_HEADER),
                         style = MaterialTheme.typography.labelMedium,
                         fontWeight = FontWeight.SemiBold
                     )
@@ -1711,11 +1960,11 @@ fun PantryItemEditorDialog(
                     )
                 }
             ) {
-                Text("Guardar")
+                Text(uiConfig.text(UiTextKey.BTN_SAVE))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancelar") }
+            TextButton(onClick = onDismiss) { Text(uiConfig.text(UiTextKey.BTN_CANCEL)) }
         }
     )
 }
@@ -1723,12 +1972,15 @@ fun PantryItemEditorDialog(
 @Composable
 fun CatalogImportDialog(
     existingNames: Set<String>,
+    uiConfig: AppUiConfig,
     onImportItem: (PantryItem) -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("📦 Catálogo Integrado de Ingredientes") },
+        title = {
+            Text("${uiConfig.text(UiTextKey.SYMBOL_CATALOG)} ${uiConfig.text(UiTextKey.PANTRY_CATALOG_DIALOG_TITLE)}")
+        },
         text = {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
@@ -1736,6 +1988,9 @@ fun CatalogImportDialog(
             ) {
                 items(BuiltInCatalog.items) { catalogItem ->
                     val alreadyAdded = existingNames.contains(catalogItem.name.lowercase())
+                    val unitDetail = if (catalogItem.defaultUnit == MeasureUnit.PIECES) {
+                        "1 pz ≈ ${RecipeCalculator.formatNumber(catalogItem.amountPerPiece)}${catalogItem.pieceEquivalenceUnit.symbol} | "
+                    } else ""
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Row(
                             modifier = Modifier
@@ -1747,7 +2002,7 @@ fun CatalogImportDialog(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(catalogItem.name, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                                 Text(
-                                    "💰 🧠 | 1 pz ≈ ${RecipeCalculator.formatNumber(catalogItem.amountPerPiece)}${catalogItem.pieceEquivalenceUnit.symbol} | ${RecipeCalculator.formatNumber(catalogItem.nutritionPer100gOrMl.caloriesKcal)} kcal/100g",
+                                    "${uiConfig.priceSymbol} ${uiConfig.nutritionSymbol} | $unitDetail${RecipeCalculator.formatNumber(catalogItem.nutritionPer100gOrMl.caloriesKcal)} kcal/100g",
                                     style = MaterialTheme.typography.labelSmall
                                 )
                             }
@@ -1755,7 +2010,10 @@ fun CatalogImportDialog(
                                 onClick = { onImportItem(catalogItem) },
                                 enabled = !alreadyAdded
                             ) {
-                                Text(if (alreadyAdded) "Agregado" else "Importar")
+                                Text(
+                                    if (alreadyAdded) uiConfig.text(UiTextKey.BTN_ALREADY_ADDED)
+                                    else uiConfig.text(UiTextKey.BTN_IMPORT)
+                                )
                             }
                         }
                     }
@@ -1763,70 +2021,331 @@ fun CatalogImportDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Cerrar") }
+            TextButton(onClick = onDismiss) { Text(uiConfig.text(UiTextKey.BTN_CLOSE)) }
         }
     )
 }
 
 // =========================================================================
-// PESTAÑA 3: CONFIGURACIÓN DE GEMINI API KEY
+// APARTADO 3: CONFIGURACIÓN (CON TEXTOS FIJOS Y OPCIONES AVANZADAS COMPLETAS)
 // =========================================================================
 
 @Composable
 fun SettingsScreen(
     currentApiKey: String,
-    onSaveApiKey: (String) -> Unit
+    uiConfig: AppUiConfig,
+    onSaveApiKey: (String) -> Unit,
+    onUpdateUiConfig: (AppUiConfig) -> Unit
 ) {
     var apiKeyInput by remember(currentApiKey) { mutableStateOf(currentApiKey) }
-    var savedBanner by remember { mutableStateOf(false) }
+    var savedApiKeyBanner by remember { mutableStateOf(false) }
+    var showAdvancedOptions by remember { mutableStateOf(false) }
+
+    // Filtros para el editor de todos los textos default en Opciones Avanzadas
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf("Todos") }
+
+    val categories = remember {
+        listOf("Todos") + UiTextKey.entries.map { it.category }.distinct()
+    }
+
+    val filteredTextKeys = remember(searchQuery, selectedCategory) {
+        UiTextKey.entries.filter { key ->
+            val matchesCat = selectedCategory == "Todos" || key.category == selectedCategory
+            val q = searchQuery.trim().lowercase()
+            val matchesSearch = q.isEmpty() ||
+                key.description.lowercase().contains(q) ||
+                key.defaultText.lowercase().contains(q)
+            matchesCat && matchesSearch
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(20.dp)
+            .padding(16.dp)
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(
-            text = "🤖 Escáner de Etiquetas con Gemini API",
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Aquí puedes guardar tu API Key de Google AI Studio (Gemini). Cuando escanees una etiqueta nutricional en la Despensa:\n" +
-                    "1. La app reduce primero la resolución de la foto a un máximo de 768 píxeles y la comprime en JPEG.\n" +
-                    "2. Envía esa imagen ligera a Gemini para consumir la menor cantidad posible de créditos/tokens.\n" +
-                    "3. Rellena automáticamente la tabla nutrimental ordenada por cada 100g/100ml.",
-            style = MaterialTheme.typography.bodyMedium
-        )
-
-        OutlinedTextField(
-            value = apiKeyInput,
-            onValueChange = {
-                apiKeyInput = it
-                savedBanner = false
-            },
-            label = { Text("Tu Gemini API Key (AIza...)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Button(
-            onClick = {
-                onSaveApiKey(apiKeyInput)
-                savedBanner = true
-            },
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("Guardar API Key en el teléfono")
+        // 1. TARJETA DE GEMINI API KEY (Textos fijos de Configuración)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "🤖 API de Gemini (Escáner de Etiquetas)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Reduce las fotos a 768px antes de enviarlas para ahorrar tokens y rellenar la tabla nutrimental.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                OutlinedTextField(
+                    value = apiKeyInput,
+                    onValueChange = {
+                        apiKeyInput = it
+                        savedApiKeyBanner = false
+                    },
+                    label = { Text("Tu Gemini API Key (AIza...)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Button(
+                    onClick = {
+                        onSaveApiKey(apiKeyInput)
+                        savedApiKeyBanner = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Guardar API Key")
+                }
+                if (savedApiKeyBanner) {
+                    Text(
+                        text = "✅ API Key guardada en el teléfono.",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
         }
 
-        if (savedBanner) {
-            Text(
-                text = "✅ API Key guardada localmente en el teléfono.",
-                color = MaterialTheme.colorScheme.primary,
-                fontWeight = FontWeight.Bold
-            )
+        // 2. ACTIVAR / DESACTIVAR SECCIONES DE LA BOTTOM BAR Y FILAS
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "🧭 Secciones de la Barra Inferior (Bottom Bar)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Activa o desactiva apartados. 'Configuración' no se puede desactivar y siempre queda fija en la esquina inferior derecha.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                AppSection.entries.forEach { section ->
+                    val isEnabled = section == AppSection.SETTINGS || uiConfig.enabledSectionIds.contains(section.id)
+                    val secTitle = when (section) {
+                        AppSection.RECIPES -> "${uiConfig.text(UiTextKey.RECIPES_TAB_ICON)} ${uiConfig.text(UiTextKey.RECIPES_TAB_LABEL)}"
+                        AppSection.PANTRY -> "${uiConfig.text(UiTextKey.PANTRY_TAB_ICON)} ${uiConfig.text(UiTextKey.PANTRY_TAB_LABEL)}"
+                        AppSection.SETTINGS -> "⚙️ Configuración (Fija en esquina inf. derecha)"
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(secTitle, style = MaterialTheme.typography.bodyMedium)
+                        Switch(
+                            checked = isEnabled,
+                            enabled = section.canBeDisabled,
+                            onCheckedChange = { checked ->
+                                if (section.canBeDisabled) {
+                                    val nextSet = uiConfig.enabledSectionIds.toMutableSet()
+                                    if (checked) nextSet.add(section.id) else nextSet.remove(section.id)
+                                    nextSet.add(AppSection.SETTINGS.id)
+                                    onUpdateUiConfig(uiConfig.copy(enabledSectionIds = nextSet))
+                                }
+                            }
+                        )
+                    }
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Text(
+                    text = "Máximo de secciones por fila antes de ampliar la Bottom Bar en más filas:",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(2, 3, 4, 5).forEach { count ->
+                        FilterChip(
+                            selected = uiConfig.maxItemsPerBottomRow == count,
+                            onClick = {
+                                onUpdateUiConfig(uiConfig.copy(maxItemsPerBottomRow = count))
+                            },
+                            label = { Text("$count por fila") }
+                        )
+                    }
+                }
+            }
         }
+
+        // 3. PARTES VISIBLES DE LA TABLA NUTRIMENTAL
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text(
+                    text = "🧠 Elementos visibles en la Tabla Nutrimental",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = "Desactiva las partes de la tabla nutrimental que no quieras que se muestren en tus recetas:",
+                    style = MaterialTheme.typography.bodySmall
+                )
+
+                NutritionToggleRow("1. Energía (Calorías kcal)", uiConfig.showCalories) {
+                    onUpdateUiConfig(uiConfig.copy(showCalories = it))
+                }
+                NutritionToggleRow("2. Proteínas (g)", uiConfig.showProtein) {
+                    onUpdateUiConfig(uiConfig.copy(showProtein = it))
+                }
+                NutritionToggleRow("3. Grasas / Lípidos Totales (g)", uiConfig.showTotalFat) {
+                    onUpdateUiConfig(uiConfig.copy(showTotalFat = it))
+                }
+                NutritionToggleRow("   • Grasas Saturadas (g)", uiConfig.showSaturatedFat) {
+                    onUpdateUiConfig(uiConfig.copy(showSaturatedFat = it))
+                }
+                NutritionToggleRow("4. Carbohidratos (g)", uiConfig.showCarbs) {
+                    onUpdateUiConfig(uiConfig.copy(showCarbs = it))
+                }
+                NutritionToggleRow("   • Azúcares (g)", uiConfig.showSugars) {
+                    onUpdateUiConfig(uiConfig.copy(showSugars = it))
+                }
+                NutritionToggleRow("5. Fibra Dietética (g)", uiConfig.showFiber) {
+                    onUpdateUiConfig(uiConfig.copy(showFiber = it))
+                }
+                NutritionToggleRow("6. Sodio (mg)", uiConfig.showSodium) {
+                    onUpdateUiConfig(uiConfig.copy(showSodium = it))
+                }
+            }
+        }
+
+        // 4. OPCIONES AVANZADAS: MODIFICAR TODOS LOS TEXTOS Y SÍMBOLOS DEFAULT DE LA APP
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "🛠️ Opciones Avanzadas",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Modifica cualquiera de los ${UiTextKey.entries.size} símbolos y textos por defecto de la app (excepto los de esta pestaña de Configuración).",
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Button(onClick = { showAdvancedOptions = !showAdvancedOptions }) {
+                        Text(if (showAdvancedOptions) "Ocultar" else "Abrir")
+                    }
+                }
+
+                if (showAdvancedOptions) {
+                    HorizontalDivider()
+
+                    // Buscador de textos y símbolos
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        label = { Text("🔍 Buscar texto o símbolo a modificar...") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // Filtro por categoría
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        categories.forEach { cat ->
+                            FilterChip(
+                                selected = selectedCategory == cat,
+                                onClick = { selectedCategory = cat },
+                                label = { Text(cat) }
+                            )
+                        }
+                    }
+
+                    // Botón para restaurar todos los textos si alguno fue cambiado
+                    if (uiConfig.customTexts.isNotEmpty()) {
+                        OutlinedButton(
+                            onClick = { onUpdateUiConfig(uiConfig.copy(customTexts = emptyMap())) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("🔄 Restaurar los ${uiConfig.customTexts.size} textos modificados a sus valores de fábrica")
+                        }
+                    }
+
+                    // Lista de campos editables para cada texto/símbolo
+                    filteredTextKeys.forEach { key ->
+                        val currentValue = uiConfig.text(key)
+                        val isModified = uiConfig.customTexts.containsKey(key.name)
+
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = currentValue,
+                                    onValueChange = { newVal ->
+                                        onUpdateUiConfig(uiConfig.withCustomText(key, newVal))
+                                    },
+                                    label = {
+                                        Text("${key.category}: ${key.description}")
+                                    },
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isModified) {
+                                    TextButton(
+                                        onClick = {
+                                            onUpdateUiConfig(uiConfig.withCustomText(key, key.defaultText))
+                                        }
+                                    ) {
+                                        Text("↺")
+                                    }
+                                }
+                            }
+                            if (isModified) {
+                                Text(
+                                    text = "Default original: \"${key.defaultText}\"",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun NutritionToggleRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
